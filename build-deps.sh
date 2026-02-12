@@ -7,6 +7,11 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source ./version.sh
 source ./emsdk/emsdk_env.sh
 
+# Force host Python so emcc does not fall back to a missing python.js runner.
+export PYTHON=${PYTHON:-/usr/bin/python3}
+export EMSDK_PYTHON=${EMSDK_PYTHON:-/usr/bin/python3}
+export PYTHON_FOR_BUILD=${PYTHON_FOR_BUILD:-/usr/bin/python3}
+
 embuilder build zlib bzip2
 
 rm -rf deps
@@ -40,7 +45,7 @@ CONFIG_SITE=../../Tools/wasm/config.site-wasm32-emscripten \
     --with-build-python=$(pwd)/../build/python \
     CFLAGS="-I ../../../xz-${XZ_VER}/prefix/include/" LDFLAGS="-L ../../../xz-${XZ_VER}/prefix/lib/"
 
-emmake make -j$(nproc)
+emmake make -j$(nproc) PYTHON=/usr/bin/python3 EMSDK_PYTHON=/usr/bin/python3
 popd
 
 popd

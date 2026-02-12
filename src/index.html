@@ -64,6 +64,26 @@ body {
 #error_msg {
     color: red;
 }
+#toast {
+    position: fixed;
+    right: 1rem;
+    top: 1rem;
+    background: rgba(20, 20, 20, 0.9);
+    color: #fff;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.95rem;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+    z-index: 200;
+}
+#toast.show {
+    opacity: 1;
+    transform: translateY(0);
+}
 </style>
 </head>
 <body>
@@ -91,6 +111,8 @@ body {
     </div>
 </div>
 
+<div id="toast"></div>
+
 <canvas id="canvas" oncontextmenu="return false;" tabindex="-1"></canvas>
 
 <script>
@@ -98,15 +120,65 @@ body {
     Module.canvas = document.getElementById("canvas");
     Module.qtCanvasElements = [Module.canvas];
 
+    var g_report_id = 0;
+    var g_report_size = 0;
+
+    var toastTimer = null;
+    function showToast(message) {
+        var toast = document.getElementById("toast");
+        if (!toast) {
+            return;
+        }
+        toast.textContent = message;
+        toast.classList.add("show");
+        if (toastTimer) {
+            clearTimeout(toastTimer);
+        }
+        toastTimer = setTimeout(function() {
+            toast.classList.remove("show");
+        }, 2000);
+    }
+
+    function parseLayerEvent(dataView) {
+        if (dataView.byteLength < 2) {
+            return null;
+        }
+        var offset = -1;
+        if (dataView.getUint8(0) === 0x40) {
+            offset = 0;
+        } else if (dataView.byteLength >= 3 && dataView.getUint8(1) === 0x40) {
+            offset = 1;
+        } else {
+            return null;
+        }
+
+        var layerIdx = offset + 1;
+        if (layerIdx >= dataView.byteLength) {
+            return null;
+        }
+
+        // Treat as layer event only if the rest of the report is zero.
+        for (var i = layerIdx + 1; i < dataView.byteLength; i++) {
+            if (dataView.getUint8(i) !== 0) {
+                return null;
+            }
+        }
+
+        return dataView.getUint8(layerIdx);
+    }
+
     function read_timeout() {
         console.log("device read timed out!");
         _vialglue_set_response_error();
     }
 
-    function my_onmessage(e) {
+    async function my_onmessage(e) {
         if (e.data.cmd == "write_device") {
-            g_device.sendReport(0, new Uint8Array(e.data.data));
-            g_read_timeout = setTimeout(read_timeout, 500);
+            var payload = new Uint8Array(e.data.data);
+            var sent = await sendReportWithFallback(payload);
+            if (sent) {
+                g_read_timeout = setTimeout(read_timeout, 500);
+            }
         } else if (e.data.cmd == "unlock_start") {
             var u8 = new Uint8Array(e.data.data);
             var blob = new Blob([u8], {'type': 'image/png'});
@@ -138,6 +210,169 @@ body {
         } else if (e.data.cmd == "fatal_error") {
             alert(e.data.msg);
         }
+    }
+
+    function findHidCollection(device, usagePage, usage) {
+        if (!device || !device.collections) {
+            return null;
+        }
+        var stack = device.collections.slice();
+        while (stack.length > 0) {
+            var node = stack.pop();
+            if (node.usagePage === usagePage && node.usage === usage) {
+                return node;
+            }
+            if (node.children && node.children.length > 0) {
+                for (var i = 0; i < node.children.length; i++) {
+                    stack.push(node.children[i]);
+                }
+            }
+        }
+        return null;
+    }
+
+    function pickReportId(device) {
+        var rawCollection = findHidCollection(device, 0xFF60, 0x61);
+        var collection = rawCollection || (device && device.collections ? device.collections[0] : null);
+        if (!collection) {
+            return 0;
+        }
+        if (collection.outputReports && collection.outputReports.length > 0) {
+            return collection.outputReports[0].reportId || 0;
+        }
+        if (collection.inputReports && collection.inputReports.length > 0) {
+            return collection.inputReports[0].reportId || 0;
+        }
+        return 0;
+    }
+
+    function logHidCollections(device) {
+        if (!device || !device.collections) {
+            console.log("WebHID collections: none");
+            return;
+        }
+        for (var i = 0; i < device.collections.length; i++) {
+            var col = device.collections[i];
+            var inIds = [];
+            var outIds = [];
+            var featIds = [];
+            if (col.inputReports) {
+                for (var j = 0; j < col.inputReports.length; j++) {
+                    inIds.push(col.inputReports[j].reportId || 0);
+                }
+            }
+            if (col.outputReports) {
+                for (var k = 0; k < col.outputReports.length; k++) {
+                    outIds.push(col.outputReports[k].reportId || 0);
+                }
+            }
+            if (col.featureReports) {
+                for (var m = 0; m < col.featureReports.length; m++) {
+                    featIds.push(col.featureReports[m].reportId || 0);
+                }
+            }
+            console.log(
+                "WebHID collection",
+                i,
+                "usagePage",
+                col.usagePage,
+                "usage",
+                col.usage,
+                "in",
+                inIds,
+                "out",
+                outIds,
+                "feature",
+                featIds,
+                "outSizes",
+                (col.outputReports || []).map(function(r) { return r.reportSize; }),
+                "inSizes",
+                (col.inputReports || []).map(function(r) { return r.reportSize; })
+            );
+        }
+    }
+
+    function pickReportSize(device, reportId) {
+        var rawCollection = findHidCollection(device, 0xFF60, 0x61);
+        var collection = rawCollection || (device && device.collections ? device.collections[0] : null);
+        if (!collection || !collection.outputReports || collection.outputReports.length === 0) {
+            return 0;
+        }
+        for (var i = 0; i < collection.outputReports.length; i++) {
+            var report = collection.outputReports[i];
+            var rid = report.reportId || 0;
+            if (rid === reportId) {
+                return report.reportSize || 0;
+            }
+        }
+        return collection.outputReports[0].reportSize || 0;
+    }
+
+    function getCandidateSizes(reportSize) {
+        if (reportSize && reportSize > 0) {
+            return [reportSize];
+        }
+        return [64, 32];
+    }
+
+    async function sendReportWithFallback(payload) {
+        if (!g_device) {
+            return false;
+        }
+        var candidates = [];
+        var rawCollection = findHidCollection(g_device, 0xFF60, 0x61);
+        if (rawCollection && rawCollection.outputReports) {
+            for (var i = 0; i < rawCollection.outputReports.length; i++) {
+                var rid = rawCollection.outputReports[i].reportId || 0;
+                if (candidates.indexOf(rid) === -1) {
+                    candidates.push(rid);
+                }
+            }
+        }
+        if (candidates.indexOf(g_report_id) === -1) {
+            candidates.unshift(g_report_id);
+        }
+        if (candidates.indexOf(0) === -1) {
+            candidates.push(0);
+        }
+        if (candidates.indexOf(1) === -1) {
+            candidates.push(1);
+        }
+        var lastError = null;
+        for (var j = 0; j < candidates.length; j++) {
+            var reportId = candidates[j];
+            var reportSize = pickReportSize(g_device, reportId);
+            var sizes = getCandidateSizes(reportSize);
+            for (var s = 0; s < sizes.length; s++) {
+                var size = sizes[s];
+                var data = payload;
+                if (payload.length !== size) {
+                    data = new Uint8Array(size);
+                    data.set(payload.slice(0, size));
+                }
+                try {
+                    await g_device.sendReport(reportId, data);
+                    g_report_id = reportId;
+                    g_report_size = size;
+                    return true;
+                } catch (err) {
+                    lastError = err;
+                    try {
+                        await g_device.sendFeatureReport(reportId, data);
+                        g_report_id = reportId;
+                        g_report_size = size;
+                        return true;
+                    } catch (featureErr) {
+                        lastError = featureErr;
+                    }
+                }
+            }
+        }
+        if (lastError) {
+            console.error("sendReport failed", lastError);
+            showToast("HID send failed: " + lastError);
+        }
+        return false;
     }
 
     const FILE_OPTIONS = {
@@ -211,7 +446,14 @@ body {
         }
         btn.value = "Connecting to the device...";
         await devices[0].open();
+        logHidCollections(devices[0]);
         devices[0].oninputreport = function(ev) {
+            console.log("WebHID input report", "id", ev.reportId, "len", ev.data.byteLength);
+            var layer = parseLayerEvent(ev.data);
+            if (layer !== null) {
+                showToast("Layer " + layer + " active");
+                return;
+            }
             clearTimeout(g_read_timeout);
             var ptr = _malloc(32);
             for (var i = 0; i < 32; ++i) {
@@ -222,6 +464,9 @@ body {
         }
 
         g_device = devices[0];
+        g_report_id = pickReportId(g_device);
+        g_report_size = pickReportSize(g_device, g_report_id);
+        console.log("WebHID reportId:", g_report_id, "reportSize:", g_report_size);
         var device_desc = {
             path: "/webhid",
             vendor_id: g_device.vendorId,
