@@ -154,6 +154,34 @@ static PyObject * vialglue_save_layout(PyObject *self, PyObject *args) {
     return PyLong_FromLong(0);
 }
 
+static PyObject * vialglue_open_pip(PyObject *self, PyObject *args) {
+    unsigned long mode = 0;
+    unsigned long shift = 0;
+
+    if (!PyArg_ParseTuple(args, "kk", &mode, &shift))
+        return NULL;
+
+    EM_ASM({
+        postMessage({cmd: "open_pip", mode: $0, shift: $1});
+    }, mode, shift);
+
+    return PyLong_FromLong(0);
+}
+
+static PyObject * vialglue_update_pip_state(PyObject *self, PyObject *args) {
+    unsigned long mode = 0;
+    unsigned long shift = 0;
+
+    if (!PyArg_ParseTuple(args, "kk", &mode, &shift))
+        return NULL;
+
+    EM_ASM({
+        postMessage({cmd: "pip_state", mode: $0, shift: $1});
+    }, mode, shift);
+
+    return PyLong_FromLong(0);
+}
+
 static PyObject* vialglue_fatal_error(PyObject *self, PyObject *args) {
     const char *msg;
 
@@ -177,6 +205,8 @@ static PyMethodDef VialglueMethods[] = {
     {"get_device_desc",  vialglue_get_device_desc, METH_VARARGS, ""},
     {"load_layout",  vialglue_load_layout, METH_VARARGS, ""},
     {"save_layout",  vialglue_save_layout, METH_VARARGS, ""},
+    {"open_pip",  vialglue_open_pip, METH_VARARGS, ""},
+    {"update_pip_state",  vialglue_update_pip_state, METH_VARARGS, ""},
     {"fatal_error",  vialglue_fatal_error, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL}
 };
